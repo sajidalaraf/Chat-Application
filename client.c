@@ -10,7 +10,7 @@
 #include <signal.h>
 
 #define MAX_LEN 200
-#define NUM_COLORS 2 // Reduced to only red and cyan
+#define NUM_COLORS 2 // Reduced to only cyan
 #define SERVER_PASSWORD "WCHAT5"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -25,7 +25,7 @@ char pending_request_from[MAX_LEN] = { 0 };
 int pending_request_color = 0;
 int my_color_code = 0;
 
-const char* colors[] = { "\033[31m", "\033[36m" }; // Only red and cyan
+const char* colors[] = { "\033[31m", "\033[36m" }; // Only cyan
 const char* def_col = "\033[0m";
 
 void catch_ctrl_c(int signal) {
