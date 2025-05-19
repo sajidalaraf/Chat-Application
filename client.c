@@ -1,101 +1,387 @@
-// Client with private messaging
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <stdio.h>
-#include <WS2tcpip.h>
+#include <stdlib.h>
+#include <string.h>
 #include <process.h>
-#include <stdbool.h>
+#include <windows.h>
+#include <signal.h>
+
+#define MAX_LEN 200
+#define NUM_COLORS 2 // Reduced to only red and cyan
+#define SERVER_PASSWORD "WCHAT5"
 
 #pragma comment(lib, "ws2_32.lib")
 
-bool initialize() {
-    WSADATA data;
-    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+int exit_flag = 0;
+HANDLE t_send = NULL;
+HANDLE t_recv = NULL;
+SOCKET client_socket = INVALID_SOCKET;
+CRITICAL_SECTION cs_print;
+int in_private_chat = 0;
+char pending_request_from[MAX_LEN] = { 0 };
+int pending_request_color = 0;
+int my_color_code = 0;
+
+const char* colors[] = { "\033[31m", "\033[36m" }; // Only red and cyan
+const char* def_col = "\033[0m";
+
+void catch_ctrl_c(int signal) {
+    (void)signal;
+    if (exit_flag) return;
+
+    exit_flag = 1;
+    const char* exit_msg = "#exit";
+    if (client_socket != INVALID_SOCKET) {
+        send(client_socket, exit_msg, (int)strlen(exit_msg) + 1, 0);
+        closesocket(client_socket);
+        client_socket = INVALID_SOCKET;
+    }
 }
 
-unsigned __stdcall SendMsg(void* args) {
-    SOCKET s = *((SOCKET*)args);
-    char message[4096];
-    char name[100];
+const char* color(int code) {
+    return colors[code % NUM_COLORS];
+}
 
-    printf("Enter your name: ");
-    fgets(name, sizeof(name), stdin);
-    name[strcspn(name, "\n")] = 0;
-    send(s, name, (int)strlen(name), 0);
+void eraseText(int cnt) {
+    EnterCriticalSection(&cs_print);
+    for (int i = 0; i < cnt; i++) {
+        printf("\b \b");
+    }
+    LeaveCriticalSection(&cs_print);
+}
 
-    printf("Enter password: ");
-    char password[100];
-    fgets(password, sizeof(password), stdin);
-    password[strcspn(password, "\n")] = 0;
-    send(s, password, (int)strlen(password), 0);
+unsigned __stdcall send_message(void* params) {
+    (void)params;
+    char str[MAX_LEN] = { 0 };
 
-    while (true) {
-        // Clear the message buffer
-        memset(message, 0, sizeof(message));
+    while (!exit_flag) {
+        EnterCriticalSection(&cs_print);
+        printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+        LeaveCriticalSection(&cs_print);
 
-        // Read input character by character
-        int i = 0;
-        while ((message[i] = getchar()) != '\n' && i < sizeof(message) - 1) {
-            i++;
+        if (fgets(str, MAX_LEN, stdin) == NULL) {
+            break;
         }
-        message[i] = '\0';
+        str[strcspn(str, "\n")] = '\0';
 
-        if (strncmp(message, "quit", 4) == 0) {
-            printf("Exiting chat...\n");
+        if ((strcmp(str, "Y") == 0 || strcmp(str, "N") == 0) && strlen(pending_request_from) > 0) {
+            send(client_socket, str, (int)strlen(str) + 1, 0);
+            memset(pending_request_from, 0, sizeof(pending_request_from));
+            continue;
+        }
+
+        if (in_private_chat && strcmp(str, "quit") == 0) {
+            send(client_socket, "#endprivate", (int)strlen("#endprivate") + 1, 0);
+            in_private_chat = 0;
+            continue;
+        }
+
+        if (strncmp(str, "//", 2) == 0) {
+            char* target_name = str + 2;
+            char* message = strchr(target_name, ' ');
+            if (message) {
+                *message = '\0';
+                message++;
+                if (strlen(message) > 0) {
+                    char direct_msg[MAX_LEN];
+                    snprintf(direct_msg, sizeof(direct_msg), "//%s %s", target_name, message);
+                    send(client_socket, direct_msg, (int)strlen(direct_msg) + 1, 0);
+                }
+            }
+            continue;
+        }
+
+        if (send(client_socket, str, (int)strlen(str) + 1, 0) == SOCKET_ERROR) {
+            printf("Send failed: %d\n", WSAGetLastError());
             break;
         }
 
-        send(s, message, (int)strlen(message), 0);
+        if (strcmp(str, "#exit") == 0) {
+            exit_flag = 1;
+            break;
+        }
     }
-
+    _endthreadex(0);
     return 0;
 }
 
-unsigned __stdcall ReceiveMsg(void* args) {
-    SOCKET s = *((SOCKET*)args);
-    char buffer[4096];
-    int recvlength;
+unsigned __stdcall recv_message(void* params) {
+    (void)params;
+    char str[MAX_LEN] = { 0 };
+    char* context = NULL;
 
-    while (true) {
-        recvlength = recv(s, buffer, sizeof(buffer), 0);
-        if (recvlength <= 0) {
-            printf("Disconnected from the server.\n");
+    while (!exit_flag) {
+        int bytes_received = recv(client_socket, str, sizeof(str), 0);
+        if (bytes_received <= 0 || exit_flag) {
             break;
         }
-        else {
-            buffer[recvlength] = '\0';
-            printf("\r%s\n", buffer);
-            // Print a fresh prompt (optional)
-            printf("> ");
+
+        EnterCriticalSection(&cs_print);
+
+        if (strstr(str, "PRIVATE_REQUEST:") != NULL) {
+            char* requester_name = str + strlen("PRIVATE_REQUEST:");
+            char* color_ptr = strchr(requester_name, ':') + 1;
+            int req_color = atoi(color_ptr);
+            char* token = strtok_s(requester_name, ":", &context);
+
+            strcpy_s(pending_request_from, sizeof(pending_request_from), token);
+            pending_request_color = req_color;
+
+            eraseText(6);
+            printf("\n%s%s wants to start a private chat with you. (Y/N): %s",
+                colors[1], token, def_col); // Name in cyan
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
             fflush(stdout);
         }
+        else if (strstr(str, "PRIVATE_CHAT_STARTED:") != NULL) {
+            char* partner_name = str + strlen("PRIVATE_CHAT_STARTED:");
+            char* color_ptr = strchr(partner_name, ':') + 1;
+            int partner_color = atoi(color_ptr);
+            char* token = strtok_s(partner_name, ":", &context);
+
+            in_private_chat = 1;
+            eraseText(6);
+            printf("\nNow in private chat with %s%s%s\n", colors[1], token, def_col); // Name in cyan
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            fflush(stdout);
+        }
+        else if (strstr(str, "PRIVATE_REQUEST_REJECTED:") != NULL) {
+            char* rejecter_name = str + strlen("PRIVATE_REQUEST_REJECTED:");
+            char* color_ptr = strchr(rejecter_name, ':') + 1;
+            int rejecter_color = atoi(color_ptr);
+            char* token = strtok_s(rejecter_name, ":", &context);
+
+            eraseText(6);
+            printf("\n%s%s rejected your private chat request%s\n",
+                colors[1], token, def_col); // Name in cyan
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            fflush(stdout);
+        }
+        else if (strcmp(str, "PRIVATE_CHAT_ENDED") == 0) {
+            in_private_chat = 0;
+            eraseText(6);
+            printf("\nPrivate chat ended. Back to group chat\n");
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            fflush(stdout);
+        }
+        else if (strstr(str, "PRIVATE_MSG:") != NULL) {
+            char* sender_name = str + strlen("PRIVATE_MSG:");
+            char* color_ptr = strchr(sender_name, ':') + 1;
+            int sender_color = atoi(color_ptr);
+            char* message = strchr(color_ptr, ':') + 1;
+            char* token = strtok_s(sender_name, ":", &context);
+
+            eraseText(6);
+            printf("\n%s[Private] %s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            fflush(stdout);
+        }
+        else if (strstr(str, "DIRECT_MSG:") != NULL) {
+            char* sender_name = str + strlen("DIRECT_MSG:");
+            char* color_ptr = strchr(sender_name, ':') + 1;
+            int sender_color = atoi(color_ptr);
+            char* message = strchr(color_ptr, ':') + 1;
+            char* token = strtok_s(sender_name, ":", &context);
+
+            eraseText(6);
+            printf("\n%s[Direct] %s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
+            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            fflush(stdout);
+        }
+        else if (strstr(str, "GROUP_MSG:") != NULL) {
+            if (!in_private_chat) {
+                char* sender_name = str + strlen("GROUP_MSG:");
+                char* color_ptr = strchr(sender_name, ':') + 1;
+                int sender_color = atoi(color_ptr);
+                char* message = strchr(color_ptr, ':') + 1;
+                char* token = strtok_s(sender_name, ":", &context);
+
+                eraseText(6);
+                printf("\n%s%s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
+                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                fflush(stdout);
+            }
+        }
+        else if (strstr(str, "has left the group chat") != NULL ||
+            strstr(str, "has rejoined the group chat") != NULL ||
+            strstr(str, "has joined") != NULL) {
+            if (!in_private_chat) {
+                eraseText(6);
+                printf("\n%s\n", str);
+                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                fflush(stdout);
+            }
+        }
+        else if (strstr(str, "COLOR_ASSIGN:") != NULL) {
+            my_color_code = atoi(str + strlen("COLOR_ASSIGN:"));
+        }
+        else {
+            if (!in_private_chat) {
+                eraseText(6);
+                printf("\n%s\n", str);
+                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                fflush(stdout);
+            }
+        }
+
+        LeaveCriticalSection(&cs_print);
     }
 
+    if (!exit_flag) {
+        exit_flag = 1;
+        catch_ctrl_c(0);
+    }
+
+    _endthreadex(0);
     return 0;
 }
 
 int main() {
-    if (!initialize()) {
-        printf("Failed to initialize Winsock\n");
+    WSADATA wsa;
+    struct sockaddr_in server;
+    char password[MAX_LEN] = { 0 };
+    char name[MAX_LEN] = { 0 };
+    char buffer[MAX_LEN] = { 0 };
+
+    printf("Initialising Winsock...\n");
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("Failed. Error Code: %d\n", WSAGetLastError());
         return 1;
     }
 
-    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(12345);
-    inet_pton(AF_INET, "127.0.0.1", &(serverAddr.sin_addr));
+    if ((client_socket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        printf("Could not create socket: %d\n", WSAGetLastError());
+        WSACleanup();
+        return 1;
+    }
 
-    connect(s, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(8888);
+    if (inet_pton(AF_INET, "127.0.0.1", &server.sin_addr) <= 0) {
+        printf("Invalid address/Address not supported\n");
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
 
-    HANDLE senderThread = (HANDLE)_beginthreadex(NULL, 0, SendMsg, &s, 0, NULL);
-    HANDLE receiverThread = (HANDLE)_beginthreadex(NULL, 0, ReceiveMsg, &s, 0, NULL);
+    if (connect(client_socket, (struct sockaddr*)&server, sizeof(server)) < 0) {
+        printf("Connect error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
 
-    WaitForSingleObject(senderThread, INFINITE);
-    WaitForSingleObject(receiverThread, INFINITE);
+    // Send password
+    printf("Enter server password: ");
+    if (fgets(password, MAX_LEN, stdin) == NULL) {
+        printf("Error reading password\n");
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    password[strcspn(password, "\n")] = '\0';
 
-    CloseHandle(senderThread);
-    CloseHandle(receiverThread);
-    closesocket(s);
+    if (send(client_socket, password, (int)strlen(password) + 1, 0) == SOCKET_ERROR) {
+        printf("Send failed: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Receive server response
+    int bytes_received = recv(client_socket, buffer, MAX_LEN, 0);
+    if (bytes_received <= 0) {
+        printf("Server disconnected or error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    buffer[bytes_received] = '\0';
+
+    if (strstr(buffer, "Invalid password") != NULL) {
+        printf("%s\n", buffer);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    else if (strstr(buffer, "PASSWORD_ACCEPTED") == NULL) {
+        printf("Unexpected server response: %s\n", buffer);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    InitializeCriticalSection(&cs_print);
+
+    // Proceed to name input
+    printf("Enter your name: ");
+    if (fgets(name, MAX_LEN, stdin) == NULL) {
+        printf("Error reading name\n");
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    name[strcspn(name, "\n")] = '\0';
+
+    if (send(client_socket, name, (int)strlen(name) + 1, 0) == SOCKET_ERROR) {
+        printf("Send failed: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Check for name error (e.g., name already in use)
+    bytes_received = recv(client_socket, buffer, MAX_LEN, 0);
+    if (bytes_received <= 0) {
+        printf("Server disconnected or error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    buffer[bytes_received] = '\0';
+
+    if (strstr(buffer, "Name already in use") != NULL) {
+        printf("%s\n", buffer);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    printf("%s\n\t  ====== Welcome to the chat-room ======   %s\n", colors[1], def_col); // Welcome message in cyan
+    printf("Type /<username> to start a private chat with that user\n");
+    printf("Type 'quit' to leave private chat and return to group chat\n");
+    printf("Type //<username> <message> to send a direct message\n");
+
+    signal(SIGINT, catch_ctrl_c);
+
+    unsigned threadID;
+    t_send = (HANDLE)_beginthreadex(NULL, 0, send_message, NULL, 0, &threadID);
+    if (t_send == NULL) {
+        printf("Failed to create send thread\n");
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    t_recv = (HANDLE)_beginthreadex(NULL, 0, recv_message, NULL, 0, &threadID);
+    if (t_recv == NULL) {
+        printf("Failed to create receive thread\n");
+        CloseHandle(t_send);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    HANDLE threads[2] = { t_send, t_recv };
+    WaitForMultipleObjects(2, threads, TRUE, INFINITE);
+
+    CloseHandle(t_send);
+    CloseHandle(t_recv);
+    closesocket(client_socket);
     WSACleanup();
+    DeleteCriticalSection(&cs_print);
     return 0;
 }
