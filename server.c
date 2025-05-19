@@ -237,13 +237,13 @@ void end_private_chat(SOCKET sock) {
     send(clients[client_idx]->sock, end_msg, (int)strlen(end_msg) + 1, 0);
 
     char broadcast_msg1[MAX_LEN * 2];
-    snprintf(broadcast_msg1, sizeof(broadcast_msg1), "%s has rejoined the group chat",
+    snprintf(broadcast_msg1, sizeof(broadcast_msg1), "%s has rejoined the group chat\n",
         clients[client_idx]->name);
     broadcast_message(broadcast_msg1, INVALID_SOCKET);
 
     if (partner_idx != -1) {
         char broadcast_msg2[MAX_LEN * 2];
-        snprintf(broadcast_msg2, sizeof(broadcast_msg2), "%s has rejoined the group chat",
+        snprintf(broadcast_msg2, sizeof(broadcast_msg2), "%s has rejoined the group chat\n",
             clients[partner_idx]->name);
         broadcast_message(broadcast_msg2, INVALID_SOCKET);
     }
@@ -323,7 +323,7 @@ unsigned __stdcall handle_client(void* arg) {
     clients[client_count++] = new_client;
 
     char join_msg[MAX_LEN * 2];
-    snprintf(join_msg, sizeof(join_msg), "%s has joined the group chat", name);
+    snprintf(join_msg, sizeof(join_msg), "%s has joined the group chat\n", name);
 
     LeaveCriticalSection(&cs_clients);
 
