@@ -10,7 +10,7 @@
 #include <signal.h>
 
 #define MAX_LEN 200
-#define NUM_COLORS 2 // Reduced to only cyan
+#define NUM_COLORS 2 
 #define SERVER_PASSWORD "WCHAT5"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -25,7 +25,7 @@ char pending_request_from[MAX_LEN] = { 0 };
 int pending_request_color = 0;
 int my_color_code = 0;
 
-const char* colors[] = { "\033[31m", "\033[36m" }; // Only cyan
+const char* colors[] = { "\033[31m", "\033[36m" }; 
 const char* def_col = "\033[0m";
 
 void catch_ctrl_c(int signal) {
@@ -59,7 +59,7 @@ unsigned __stdcall send_message(void* params) {
 
     while (!exit_flag) {
         EnterCriticalSection(&cs_print);
-        printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+        printf("%sYou: %s", colors[1], def_col);
         LeaveCriticalSection(&cs_print);
 
         if (fgets(str, MAX_LEN, stdin) == NULL) {
@@ -73,7 +73,7 @@ unsigned __stdcall send_message(void* params) {
             continue;
         }
 
-        if (in_private_chat && strcmp(str, "quit") == 0) {
+        if (in_private_chat && strcmp(str, "return") == 0) {
             send(client_socket, "#endprivate", (int)strlen("#endprivate") + 1, 0);
             in_private_chat = 0;
             continue;
@@ -132,8 +132,8 @@ unsigned __stdcall recv_message(void* params) {
 
             eraseText(6);
             printf("\n%s%s wants to start a private chat with you. (Y/N): %s",
-                colors[1], token, def_col); // Name in cyan
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                colors[1], token, def_col);
+            printf("%sYou: %s", colors[1], def_col);
             fflush(stdout);
         }
         else if (strstr(str, "PRIVATE_CHAT_STARTED:") != NULL) {
@@ -144,8 +144,8 @@ unsigned __stdcall recv_message(void* params) {
 
             in_private_chat = 1;
             eraseText(6);
-            printf("\nNow in private chat with %s%s%s\n", colors[1], token, def_col); // Name in cyan
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            printf("\nNow in private chat with %s%s%s\n", colors[1], token, def_col);
+            printf("%sYou: %s", colors[1], def_col);
             fflush(stdout);
         }
         else if (strstr(str, "PRIVATE_REQUEST_REJECTED:") != NULL) {
@@ -156,15 +156,15 @@ unsigned __stdcall recv_message(void* params) {
 
             eraseText(6);
             printf("\n%s%s rejected your private chat request%s\n",
-                colors[1], token, def_col); // Name in cyan
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                colors[1], token, def_col); 
+            printf("%sYou: %s", colors[1], def_col); 
             fflush(stdout);
         }
         else if (strcmp(str, "PRIVATE_CHAT_ENDED") == 0) {
             in_private_chat = 0;
             eraseText(6);
             printf("\nPrivate chat ended. Back to group chat\n");
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            printf("%sYou: %s", colors[1], def_col); 
             fflush(stdout);
         }
         else if (strstr(str, "PRIVATE_MSG:") != NULL) {
@@ -175,8 +175,8 @@ unsigned __stdcall recv_message(void* params) {
             char* token = strtok_s(sender_name, ":", &context);
 
             eraseText(6);
-            printf("\n%s[Private] %s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            printf("\n%s[Private] %s: %s%s\n", colors[1], token, def_col, message); 
+            printf("%sYou: %s", colors[1], def_col); 
             fflush(stdout);
         }
         else if (strstr(str, "DIRECT_MSG:") != NULL) {
@@ -187,8 +187,7 @@ unsigned __stdcall recv_message(void* params) {
             char* token = strtok_s(sender_name, ":", &context);
 
             eraseText(6);
-            printf("\n%s[Direct] %s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
-            printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+            printf("\n%s[Direct] %s: %s%s\n", colors[1], token, def_col, message); 
             fflush(stdout);
         }
         else if (strstr(str, "GROUP_MSG:") != NULL) {
@@ -200,18 +199,17 @@ unsigned __stdcall recv_message(void* params) {
                 char* token = strtok_s(sender_name, ":", &context);
 
                 eraseText(6);
-                printf("\n%s%s: %s%s\n", colors[1], token, def_col, message); // Name in cyan
-                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
-                fflush(stdout);
+                printf("\n%s%s: %s%s\n", colors[1], token, def_col, message); 
+                printf("%sYou: %s", colors[1], def_col); 
             }
         }
-        else if (strstr(str, "has left the group chat") != NULL ||
-            strstr(str, "has rejoined the group chat") != NULL ||
+        else if (strstr(str, "has left the group chat\n") != NULL ||
+            strstr(str, "has rejoined the group chat\n") != NULL ||
             strstr(str, "has joined") != NULL) {
             if (!in_private_chat) {
                 eraseText(6);
                 printf("\n%s\n", str);
-                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                printf("%sYou: %s", colors[1], def_col); 
                 fflush(stdout);
             }
         }
@@ -222,7 +220,7 @@ unsigned __stdcall recv_message(void* params) {
             if (!in_private_chat) {
                 eraseText(6);
                 printf("\n%s\n", str);
-                printf("%sYou: %s", colors[1], def_col); // "You:" in cyan
+                printf("%sYou: %s", colors[1], def_col); 
                 fflush(stdout);
             }
         }
@@ -350,10 +348,10 @@ int main() {
         return 1;
     }
 
-    printf("%s\n\t  ====== Welcome to the chat-room ======   %s\n", colors[1], def_col); // Welcome message in cyan
-    printf("Type /<username> to start a private chat with that user\n");
-    printf("Type 'quit' to leave private chat and return to group chat\n");
-    printf("Type //<username> <message> to send a direct message\n");
+    printf("%s\n \n\t              Welcome to WChat              %s\n", colors[1], def_col); 
+    printf("\nType /<username> to start a private chat with that user\n");
+    printf("Type 'return' to leave private chat and return to group chat\n");
+    printf("Type //<username> <message> to send a direct message\n \n");
 
     signal(SIGINT, catch_ctrl_c);
 
