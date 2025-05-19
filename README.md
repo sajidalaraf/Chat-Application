@@ -60,11 +60,25 @@ A simple, multi-client chat application built using C and Winsock2 on Windows. T
 
 ## Areas for Future Improvements
 
-1. **Cross-Platform Support**: Port the application to Linux/macOS using POSIX sockets for broader compatibility.
-2. **GUI Interface**: Replace the console interface with a graphical user interface using a library like Qt or SDL.
-3. **Persistent Chat History**: Save chat messages to a file or database for users to review past conversations.
-4. **User Authentication**: Implement a more robust authentication system (e.g., username/password pairs) instead of a single server password.
-5. **Encryption**: Add end-to-end encryption for private messages to enhance security.
-6. **Online User List**: Display a list of currently online users with a command like `/users`.
-7. **Customizable Colors**: Allow users to choose their display color instead of a fixed cyan for names.
-8. **File Sharing**: Enable users to share files or images through the chat.
+1. **AI Integration**: Include an AI in the chat, capable of answering questions and solving problems when prompted by users.
+2. **Cross-Platform Support**: Port the application to Linux/macOS using POSIX sockets for broader compatibility.
+3. **GUI Interface**: Replace the console interface with a graphical user interface using a library like Qt or SDL.
+4. **Persistent Chat History**: Save chat messages to a file or database for users to review past conversations.
+5. **User Authentication**: Implement a more robust authentication system (e.g., username/password pairs) instead of a single server password.
+6. **Encryption**: Add end-to-end encryption for private messages to enhance security.
+7. **Online User List**: Display a list of currently online users with a command like `/users`.
+8. **Customizable Colors**: Allow users to choose their display color instead of a fixed cyan for names.
+9. **File Sharing**: Enable users to share files or images through the chat.
+
+
+
+
+
+
+
+
+
+
+
+
+
