@@ -1,145 +1,525 @@
-// Server with private messaging
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <process.h>
 #include <windows.h>
-#include <string.h>
+#include <time.h>
 
-#pragma comment(lib,"ws2_32.lib")
-
-#define PORT 12345
-#define BUFFER_SIZE 4096
+#define MAX_CLIENTS 100
+#define MAX_LEN 200
+#define NUM_COLORS 6
 #define SERVER_PASSWORD "WCHAT5"
 
+#pragma comment(lib, "ws2_32.lib")
+
 typedef struct {
-    SOCKET socket;
-    char name[100];
-} Client;
+    SOCKET sock;
+    char name[MAX_LEN];
+    int color_code;
+    int in_private_chat;
+    char private_partner[MAX_LEN];
+    char pending_request_from[MAX_LEN];
+} client_t;
 
-CRITICAL_SECTION clientsCriticalSection;
-Client clients[FD_SETSIZE];
-int clientCount = 0;
+client_t* clients[MAX_CLIENTS];
+CRITICAL_SECTION cs_clients;
+int client_count = 0;
 
-BOOL Initialize() {
-    WSADATA data;
-    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+void broadcast_message(char* message, SOCKET sender_sock) {
+    EnterCriticalSection(&cs_clients);
+
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i]->sock != sender_sock && !clients[i]->in_private_chat) {
+            send(clients[i]->sock, message, (int)strlen(message) + 1, 0);
+        }
+    }
+
+    LeaveCriticalSection(&cs_clients);
 }
 
-unsigned __stdcall InteractWithClient(void* arg) {
-    SOCKET clientSocket = *(SOCKET*)arg;
-    char buffer[BUFFER_SIZE];
-    int bytesReceived;
-    char clientName[100];
+void send_private_message(char* message, char* sender_name, char* receiver_name, int sender_color) {
+    EnterCriticalSection(&cs_clients);
 
-    // Request client name
-    send(clientSocket, "Enter your name: ", 17, 0);
-    bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
-    if (bytesReceived <= 0) {
-        closesocket(clientSocket);
-        return 0;
-    }
-    buffer[bytesReceived] = '\0';
-    strcpy_s(clientName, sizeof(clientName), buffer);
+    char private_msg[MAX_LEN * 2];
+    snprintf(private_msg, sizeof(private_msg), "PRIVATE_MSG:%s:%d:%s", sender_name, sender_color, message);
 
-    EnterCriticalSection(&clientsCriticalSection);
-    strcpy_s(clients[clientCount].name, sizeof(clients[clientCount].name), clientName);
-    clients[clientCount].socket = clientSocket;
-    clientCount++;
-    LeaveCriticalSection(&clientsCriticalSection);
-
-    printf("Client [%s] connected\n", clientName);
-
-    // Request password
-    send(clientSocket, "Enter password: ", 16, 0);
-    bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
-    buffer[bytesReceived] = '\0';
-
-    if (strcmp(buffer, SERVER_PASSWORD) != 0) {
-        send(clientSocket, "Invalid password\n", 17, 0);
-        closesocket(clientSocket);
-        return 0;
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i]->name, receiver_name) == 0) {
+            send(clients[i]->sock, private_msg, (int)strlen(private_msg) + 1, 0);
+            break;
+        }
     }
 
-    send(clientSocket, "Welcome to the chat!\n", 21, 0);
+    LeaveCriticalSection(&cs_clients);
+}
 
+void send_direct_message(char* message, char* sender_name, char* receiver_name, int sender_color, SOCKET sender_sock) {
+    EnterCriticalSection(&cs_clients);
+
+    int target_idx = -1;
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i]->name, receiver_name) == 0) {
+            target_idx = i;
+            break;
+        }
+    }
+
+    if (target_idx == -1) {
+        char error_msg[MAX_LEN];
+        snprintf(error_msg, sizeof(error_msg), "User '%s' not found or not available", receiver_name);
+        send(sender_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        LeaveCriticalSection(&cs_clients);
+        return;
+    }
+
+    char direct_msg[MAX_LEN * 2];
+    snprintf(direct_msg, sizeof(direct_msg), "DIRECT_MSG:%s:%d:%s", sender_name, sender_color, message);
+
+    send(clients[target_idx]->sock, direct_msg, (int)strlen(direct_msg) + 1, 0);
+
+    LeaveCriticalSection(&cs_clients);
+}
+
+int find_client_by_socket(SOCKET sock) {
+    EnterCriticalSection(&cs_clients);
+    int index = -1;
+
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i]->sock == sock) {
+            index = i;
+            break;
+        }
+    }
+
+    LeaveCriticalSection(&cs_clients);
+    return index;
+}
+
+int find_client_by_name(char* name) {
+    EnterCriticalSection(&cs_clients);
+    int index = -1;
+
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i]->name, name) == 0) {
+            index = i;
+            break;
+        }
+    }
+
+    LeaveCriticalSection(&cs_clients);
+    return index;
+}
+
+void handle_private_chat_request(SOCKET requester_sock, char* target_name) {
+    EnterCriticalSection(&cs_clients);
+
+    int requester_idx = find_client_by_socket(requester_sock);
+    int target_idx = find_client_by_name(target_name);
+
+    if (requester_idx == -1 || target_idx == -1) {
+        LeaveCriticalSection(&cs_clients);
+        char error_msg[MAX_LEN];
+        snprintf(error_msg, sizeof(error_msg), "User '%s' not found or not available", target_name);
+        send(requester_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        return;
+    }
+
+    if (clients[target_idx]->in_private_chat) {
+        LeaveCriticalSection(&cs_clients);
+        char busy_msg[MAX_LEN];
+        snprintf(busy_msg, sizeof(busy_msg), "User '%s' is already in a private chat", target_name);
+        send(requester_sock, busy_msg, (int)strlen(busy_msg) + 1, 0);
+        return;
+    }
+
+    char request_msg[MAX_LEN];
+    snprintf(request_msg, sizeof(request_msg), "PRIVATE_REQUEST:%s:%d",
+        clients[requester_idx]->name, clients[requester_idx]->color_code);
+
+    strncpy(clients[target_idx]->pending_request_from, clients[requester_idx]->name, MAX_LEN - 1);
+
+    send(clients[target_idx]->sock, request_msg, (int)strlen(request_msg) + 1, 0);
+
+    LeaveCriticalSection(&cs_clients);
+}
+
+void start_private_chat(SOCKET responder_sock, char* response) {
+    EnterCriticalSection(&cs_clients);
+
+    int responder_idx = find_client_by_socket(responder_sock);
+    if (responder_idx == -1) {
+        LeaveCriticalSection(&cs_clients);
+        return;
+    }
+
+    char request_sender[MAX_LEN] = { 0 };
+    strncpy(request_sender, clients[responder_idx]->pending_request_from, MAX_LEN - 1);
+
+    int request_sender_idx = find_client_by_name(request_sender);
+    if (request_sender_idx == -1) {
+        LeaveCriticalSection(&cs_clients);
+        char error_msg[MAX_LEN];
+        snprintf(error_msg, sizeof(error_msg), "The requesting user is no longer available");
+        send(responder_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        return;
+    }
+
+    if (strcmp(response, "Y") == 0) {
+        clients[responder_idx]->in_private_chat = 1;
+        clients[request_sender_idx]->in_private_chat = 1;
+
+        strncpy(clients[responder_idx]->private_partner, request_sender, MAX_LEN - 1);
+        strncpy(clients[request_sender_idx]->private_partner, clients[responder_idx]->name, MAX_LEN - 1);
+
+        char start_msg_to_responder[MAX_LEN];
+        snprintf(start_msg_to_responder, sizeof(start_msg_to_responder), "PRIVATE_CHAT_STARTED:%s:%d",
+            request_sender, clients[request_sender_idx]->color_code);
+
+        char start_msg_to_requester[MAX_LEN];
+        snprintf(start_msg_to_requester, sizeof(start_msg_to_requester), "PRIVATE_CHAT_STARTED:%s:%d",
+            clients[responder_idx]->name, clients[responder_idx]->color_code);
+
+        send(responder_sock, start_msg_to_responder, (int)strlen(start_msg_to_responder) + 1, 0);
+        send(clients[request_sender_idx]->sock, start_msg_to_requester, (int)strlen(start_msg_to_requester) + 1, 0);
+
+        char broadcast_msg1[MAX_LEN * 2];
+        snprintf(broadcast_msg1, sizeof(broadcast_msg1), "%s has left the group chat",
+            clients[request_sender_idx]->name);
+        broadcast_message(broadcast_msg1, INVALID_SOCKET);
+
+        char broadcast_msg2[MAX_LEN * 2];
+        snprintf(broadcast_msg2, sizeof(broadcast_msg2), "%s has left the group chat",
+            clients[responder_idx]->name);
+        broadcast_message(broadcast_msg2, INVALID_SOCKET);
+    }
+    else {
+        char reject_msg[MAX_LEN];
+        snprintf(reject_msg, sizeof(reject_msg), "PRIVATE_REQUEST_REJECTED:%s:%d",
+            clients[responder_idx]->name, clients[responder_idx]->color_code);
+
+        send(clients[request_sender_idx]->sock, reject_msg, (int)strlen(reject_msg) + 1, 0);
+    }
+
+    memset(clients[responder_idx]->pending_request_from, 0, MAX_LEN);
+    LeaveCriticalSection(&cs_clients);
+}
+
+void end_private_chat(SOCKET sock) {
+    EnterCriticalSection(&cs_clients);
+
+    int client_idx = find_client_by_socket(sock);
+    if (client_idx == -1 || !clients[client_idx]->in_private_chat) {
+        LeaveCriticalSection(&cs_clients);
+        return;
+    }
+
+    char partner_name[MAX_LEN];
+    strncpy(partner_name, clients[client_idx]->private_partner, MAX_LEN - 1);
+
+    int partner_idx = find_client_by_name(partner_name);
+
+    clients[client_idx]->in_private_chat = 0;
+    memset(clients[client_idx]->private_partner, 0, MAX_LEN);
+
+    if (partner_idx != -1) {
+        clients[partner_idx]->in_private_chat = 0;
+        memset(clients[partner_idx]->private_partner, 0, MAX_LEN);
+
+        const char* end_msg = "PRIVATE_CHAT_ENDED";
+        send(clients[partner_idx]->sock, end_msg, (int)strlen(end_msg) + 1, 0);
+    }
+
+    const char* end_msg = "PRIVATE_CHAT_ENDED";
+    send(clients[client_idx]->sock, end_msg, (int)strlen(end_msg) + 1, 0);
+
+    char broadcast_msg1[MAX_LEN * 2];
+    snprintf(broadcast_msg1, sizeof(broadcast_msg1), "%s has rejoined the group chat",
+        clients[client_idx]->name);
+    broadcast_message(broadcast_msg1, INVALID_SOCKET);
+
+    if (partner_idx != -1) {
+        char broadcast_msg2[MAX_LEN * 2];
+        snprintf(broadcast_msg2, sizeof(broadcast_msg2), "%s has rejoined the group chat",
+            clients[partner_idx]->name);
+        broadcast_message(broadcast_msg2, INVALID_SOCKET);
+    }
+
+    LeaveCriticalSection(&cs_clients);
+}
+
+unsigned __stdcall handle_client(void* arg) {
+    SOCKET client_sock = *(SOCKET*)arg;
+    free(arg);
+
+    // Receive and verify password
+    char password[MAX_LEN] = { 0 };
+    int received = recv(client_sock, password, MAX_LEN, 0);
+    if (received <= 0) {
+        closesocket(client_sock);
+        return 1;
+    }
+
+    if (strcmp(password, SERVER_PASSWORD) != 0) {
+        const char* error_msg = "Invalid password";
+        send(client_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        closesocket(client_sock);
+        return 1;
+    }
+
+    // Send password acceptance
+    const char* accept_msg = "PASSWORD_ACCEPTED";
+    send(client_sock, accept_msg, (int)strlen(accept_msg) + 1, 0);
+
+    // Receive client name
+    char name[MAX_LEN] = { 0 };
+    received = recv(client_sock, name, MAX_LEN, 0);
+    if (received <= 0) {
+        closesocket(client_sock);
+        return 1;
+    }
+
+    EnterCriticalSection(&cs_clients);
+
+    int name_exists = 0;
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i]->name, name) == 0) {
+            name_exists = 1;
+            break;
+        }
+    }
+
+    if (name_exists) {
+        LeaveCriticalSection(&cs_clients);
+        const char* error_msg = "Name already in use. Please reconnect with a different name.";
+        send(client_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        closesocket(client_sock);
+        return 1;
+    }
+
+    client_t* new_client = (client_t*)malloc(sizeof(client_t));
+    if (!new_client) {
+        LeaveCriticalSection(&cs_clients);
+        const char* error_msg = "Server error: Could not allocate memory for client.";
+        send(client_sock, error_msg, (int)strlen(error_msg) + 1, 0);
+        closesocket(client_sock);
+        return 1;
+    }
+
+    new_client->sock = client_sock;
+    strncpy(new_client->name, name, MAX_LEN - 1);
+    new_client->color_code = rand() % NUM_COLORS;
+    new_client->in_private_chat = 0;
+    memset(new_client->private_partner, 0, MAX_LEN);
+    memset(new_client->pending_request_from, 0, MAX_LEN);
+
+    char color_msg[MAX_LEN];
+    snprintf(color_msg, sizeof(color_msg), "COLOR_ASSIGN:%d", new_client->color_code);
+    send(client_sock, color_msg, (int)strlen(color_msg) + 1, 0);
+
+    clients[client_count++] = new_client;
+
+    char join_msg[MAX_LEN * 2];
+    snprintf(join_msg, sizeof(join_msg), "%s has joined the group chat", name);
+
+    LeaveCriticalSection(&cs_clients);
+
+    broadcast_message(join_msg, client_sock);
+
+    char buffer[MAX_LEN] = { 0 };
     while (1) {
-        bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
-        if (bytesReceived <= 0) {
-            printf("Client [%s] disconnected\n", clientName);
+        received = recv(client_sock, buffer, MAX_LEN, 0);
+        if (received <= 0) {
             break;
         }
 
-        buffer[bytesReceived] = '\0';
-        printf("[%s]: %s\n", clientName, buffer);
+        if (strcmp(buffer, "#exit") == 0) {
+            break;
+        }
 
-        // Private messaging logic
-        if (buffer[0] == '/') {
-            char recipientName[100], message[BUFFER_SIZE];
-            int result = sscanf_s(buffer, "/%99s %[^\n]", recipientName, sizeof(recipientName), message, sizeof(message));
+        if (strcmp(buffer, "#endprivate") == 0) {
+            end_private_chat(client_sock);
+            continue;
+        }
 
-            if (result == 2) {
-                char privateMessage[BUFFER_SIZE + 100];
-                sprintf_s(privateMessage, sizeof(privateMessage), "[Private from %s]: %s", clientName, message);
-
-                EnterCriticalSection(&clientsCriticalSection);
-                for (int i = 0; i < clientCount; ++i) {
-                    if (strcmp(clients[i].name, recipientName) == 0) {
-                        send(clients[i].socket, privateMessage, (int)strlen(privateMessage), 0);
-                        break;
-                    }
-                }
-                LeaveCriticalSection(&clientsCriticalSection);
+        if ((strcmp(buffer, "Y") == 0 || strcmp(buffer, "N") == 0)) {
+            int client_idx = find_client_by_socket(client_sock);
+            if (client_idx != -1 && strlen(clients[client_idx]->pending_request_from) > 0) {
+                start_private_chat(client_sock, buffer);
+                continue;
             }
         }
-        else {
-            // Broadcast message to all except sender
-            char broadcastMessage[BUFFER_SIZE + 100];
-            sprintf_s(broadcastMessage, sizeof(broadcastMessage), "[%s]: %s", clientName, buffer);
 
-            EnterCriticalSection(&clientsCriticalSection);
-            for (int i = 0; i < clientCount; ++i) {
-                if (clients[i].socket != clientSocket) {
-                    send(clients[i].socket, broadcastMessage, (int)strlen(broadcastMessage), 0);
+        int client_idx = find_client_by_socket(client_sock);
+        if (client_idx == -1) {
+            continue;
+        }
+
+        if (strncmp(buffer, "//", 2) == 0) {
+            char* target_name = buffer + 2;
+            char* message = strchr(target_name, ' ');
+            if (message) {
+                *message = '\0';
+                message++;
+                if (strlen(message) > 0) {
+                    send_direct_message(message, clients[client_idx]->name, target_name,
+                        clients[client_idx]->color_code, client_sock);
                 }
             }
-            LeaveCriticalSection(&clientsCriticalSection);
+            continue;
+        }
+
+        if (buffer[0] == '/') {
+            char target_name[MAX_LEN] = { 0 };
+            strncpy(target_name, buffer + 1, sizeof(target_name) - 1);
+            handle_private_chat_request(client_sock, target_name);
+            continue;
+        }
+
+        if (clients[client_idx]->in_private_chat) {
+            send_private_message(buffer, clients[client_idx]->name,
+                clients[client_idx]->private_partner,
+                clients[client_idx]->color_code);
+        }
+        else {
+            char msg[MAX_LEN * 2];
+            snprintf(msg, sizeof(msg), "GROUP_MSG:%s:%d:%s",
+                clients[client_idx]->name, clients[client_idx]->color_code, buffer);
+            broadcast_message(msg, client_sock);
         }
     }
 
-    closesocket(clientSocket);
+    EnterCriticalSection(&cs_clients);
+
+    int idx = -1;
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i]->sock == client_sock) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx != -1) {
+        if (clients[idx]->in_private_chat) {
+            char partner_name[MAX_LEN];
+            strncpy(partner_name, clients[idx]->private_partner, MAX_LEN - 1);
+
+            int partner_idx = -1;
+            for (int i = 0; i < client_count; i++) {
+                if (strcmp(clients[i]->name, partner_name) == 0) {
+                    partner_idx = i;
+                    break;
+                }
+            }
+
+            if (partner_idx != -1) {
+                clients[partner_idx]->in_private_chat = 0;
+                memset(clients[partner_idx]->private_partner, 0, MAX_LEN);
+
+                const char* end_msg = "PRIVATE_CHAT_ENDED";
+                send(clients[partner_idx]->sock, end_msg, (int)strlen(end_msg) + 1, 0);
+            }
+        }
+
+        char leave_msg[MAX_LEN * 2];
+        snprintf(leave_msg, sizeof(leave_msg), "%s has left the group chat", clients[idx]->name);
+
+        free(clients[idx]);
+        for (int i = idx; i < client_count - 1; i++) {
+            clients[i] = clients[i + 1];
+        }
+        client_count--;
+
+        LeaveCriticalSection(&cs_clients);
+
+        broadcast_message(leave_msg, INVALID_SOCKET);
+    }
+    else {
+        LeaveCriticalSection(&cs_clients);
+    }
+
+    closesocket(client_sock);
     _endthreadex(0);
     return 0;
 }
 
 int main() {
-    if (!Initialize()) {
-        printf("Winsock initialization failed\n");
+    WSADATA wsa;
+    SOCKET server_sock, client_sock;
+    struct sockaddr_in server, client;
+    int c = sizeof(struct sockaddr_in);
+    HANDLE thread;
+    unsigned threadID;
+
+    printf("Initializing Winsock...");
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("Failed. Error Code: %d\n", WSAGetLastError());
         return 1;
     }
+    printf("Initialized.\n");
 
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(PORT);
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        printf("Could not create socket: %d\n", WSAGetLastError());
+        WSACleanup();
+        return 1;
+    }
+    printf("Socket created.\n");
 
-    bind(listenSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
-    listen(listenSocket, SOMAXCONN);
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = INADDR_ANY;
+    server.sin_port = htons(8888);
 
-    InitializeCriticalSection(&clientsCriticalSection);
-    printf("Server started, listening on port %d\n", PORT);
+    if (bind(server_sock, (struct sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
+        printf("Bind failed with error code: %d\n", WSAGetLastError());
+        closesocket(server_sock);
+        WSACleanup();
+        return 1;
+    }
+    printf("Bind done.\n");
+
+    listen(server_sock, 5);
+    printf("Waiting for incoming connections...\n");
+
+    InitializeCriticalSection(&cs_clients);
+
+    srand((unsigned int)time(NULL));
 
     while (1) {
-        SOCKET clientSocket = accept(listenSocket, NULL, NULL);
-        EnterCriticalSection(&clientsCriticalSection);
-        clients[clientCount].socket = clientSocket;
-        LeaveCriticalSection(&clientsCriticalSection);
+        client_sock = accept(server_sock, (struct sockaddr*)&client, &c);
+        if (client_sock == INVALID_SOCKET) {
+            printf("Accept failed with error code: %d\n", WSAGetLastError());
+            continue;
+        }
 
-        _beginthreadex(NULL, 0, InteractWithClient, &clientSocket, 0, NULL);
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(client.sin_addr), client_ip, INET_ADDRSTRLEN);
+        printf("Connection accepted from %s:%d\n", client_ip, ntohs(client.sin_port));
+
+        SOCKET* new_sock = (SOCKET*)malloc(sizeof(SOCKET));
+        if (new_sock == NULL) {
+            printf("Memory allocation failed\n");
+            closesocket(client_sock);
+            continue;
+        }
+        *new_sock = client_sock;
+
+        thread = (HANDLE)_beginthreadex(NULL, 0, handle_client, (void*)new_sock, 0, &threadID);
+        if (thread == NULL) {
+            printf("Thread creation failed\n");
+            free(new_sock);
+            closesocket(client_sock);
+            continue;
+        }
+
+        CloseHandle(thread);
     }
 
-    DeleteCriticalSection(&clientsCriticalSection);
-    closesocket(listenSocket);
+    closesocket(server_sock);
     WSACleanup();
+    DeleteCriticalSection(&cs_clients);
+
     return 0;
 }
