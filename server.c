@@ -8,13 +8,23 @@
 #include <process.h>
 #include <windows.h>
 #include <time.h>
+#include <curl/curl.h>
+#include <cjson/cJSON.h>
 
 #define MAX_CLIENTS 100
 #define MAX_LEN 200
 #define NUM_COLORS 6
 #define SERVER_PASSWORD "WCHAT5"
+#define GEMINI_API_KEY "AIzaSyCcdhOA_O_7qVHtbsAQ1y7Jhde2hHMtEwI"
+#define GEMINI_API_URL "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" GEMINI_API_KEY
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "libcurl.lib")
+
+typedef struct {
+    char* memory;
+    size_t size;
+} MemoryStruct;
 
 typedef struct {
     SOCKET sock;
@@ -28,6 +38,122 @@ typedef struct {
 client_t* clients[MAX_CLIENTS];
 CRITICAL_SECTION cs_clients;
 int client_count = 0;
+
+// Modified list_online_users to exclude users in private chat
+void list_online_users(SOCKET requesterSocket) {
+    char userList[MAX_LEN * 2] = "[Server]: Online users:\n";
+    EnterCriticalSection(&cs_clients);
+
+    for (int i = 0; i < client_count; ++i) {
+        // Only include users who are not in a private chat
+        if (!clients[i]->in_private_chat) {
+            strcat_s(userList, sizeof(userList), " - ");
+            strcat_s(userList, sizeof(userList), clients[i]->name);
+            strcat_s(userList, sizeof(userList), "\n");
+        }
+    }
+
+    LeaveCriticalSection(&cs_clients);
+    send(requesterSocket, userList, (int)strlen(userList) + 1, 0);
+}
+
+size_t WriteMemoryCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t totalSize = size * nmemb;
+    MemoryStruct* mem = (MemoryStruct*)userp;
+
+    char* ptr = (char*)realloc(mem->memory, mem->size + totalSize + 1);
+    if (ptr == NULL) {
+        return 0;
+    }
+
+    mem->memory = ptr;
+    memcpy(&(mem->memory[mem->size]), contents, totalSize);
+    mem->size += totalSize;
+    mem->memory[mem->size] = 0;
+    return totalSize;
+}
+
+void getGeminiResponse(const char* message, char* response, size_t response_size) {
+    CURL* curl;
+    CURLcode res;
+
+    MemoryStruct chunk;
+    chunk.memory = (char*)malloc(1);
+    chunk.size = 0;
+
+    char postFields[MAX_LEN * 2];
+    snprintf(postFields, sizeof(postFields),
+        "{\"contents\":[{\"parts\":[{\"text\":\"%s\"}]}]}", message);
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, GEMINI_API_URL);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postFields);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, (struct curl_slist*)curl_slist_append(NULL, "Content-Type: application/json"));
+
+        res = curl_easy_perform(curl);
+        if (res != CURLE_OK) {
+            snprintf(response, response_size, "Gemini AI Error: %s", curl_easy_strerror(res));
+        }
+        else {
+            cJSON* json = cJSON_Parse(chunk.memory);
+            if (json) {
+                cJSON* candidates = cJSON_GetObjectItem(json, "candidates");
+                if (candidates && cJSON_IsArray(candidates) && cJSON_GetArraySize(candidates) > 0) {
+                    cJSON* firstCandidate = cJSON_GetArrayItem(candidates, 0);
+                    if (firstCandidate) {
+                        cJSON* content = cJSON_GetObjectItem(firstCandidate, "content");
+                        if (content) {
+                            cJSON* parts = cJSON_GetObjectItem(content, "parts");
+                            if (parts && cJSON_IsArray(parts) && cJSON_GetArraySize(parts) > 0) {
+                                cJSON* firstPart = cJSON_GetArrayItem(parts, 0);
+                                if (firstPart) {
+                                    cJSON* text = cJSON_GetObjectItem(firstPart, "text");
+                                    if (text && cJSON_IsString(text)) {
+                                        snprintf(response, response_size, "Gemini AI: %s", text->valuestring);
+                                    }
+                                    else {
+                                        snprintf(response, response_size, "Gemini AI Error: No text in response");
+                                    }
+                                }
+                                else {
+                                    snprintf(response, response_size, "Gemini AI Error: No parts in response");
+                                }
+                            }
+                            else {
+                                snprintf(response, response_size, "Gemini AI Error: No parts array");
+                            }
+                        }
+                        else {
+                            snprintf(response, response_size, "Gemini AI Error: No content in response");
+                        }
+                    }
+                    else {
+                        snprintf(response, response_size, "Gemini AI Error: No candidates in response");
+                    }
+                }
+                else {
+                    snprintf(response, response_size, "Gemini AI Error: No candidates array");
+                }
+                cJSON_Delete(json);
+            }
+            else {
+                snprintf(response, response_size, "Gemini AI Error: Failed to parse response");
+            }
+        }
+
+        curl_easy_cleanup(curl);
+        free(chunk.memory);
+    }
+    else {
+        snprintf(response, response_size, "Gemini AI Error: Failed to initialize curl");
+    }
+    curl_global_cleanup();
+}
 
 void broadcast_message(char* message, SOCKET sender_sock) {
     EnterCriticalSection(&cs_clients);
@@ -355,6 +481,24 @@ unsigned __stdcall handle_client(void* arg) {
 
         int client_idx = find_client_by_socket(client_sock);
         if (client_idx == -1) {
+            continue;
+        }
+
+        if (strcmp(buffer, "/list") == 0) {
+            list_online_users(client_sock);
+            continue;
+        }
+
+        if (strncmp(buffer, "/ai", 3) == 0) {
+            if (strlen(buffer) > 4) {
+                char aiResponse[MAX_LEN * 2];
+                getGeminiResponse(buffer + 4, aiResponse, sizeof(aiResponse));
+                send(client_sock, aiResponse, (int)strlen(aiResponse) + 1, 0);
+            }
+            else {
+                const char* usage_msg = "Usage: /ai <your question>";
+                send(client_sock, usage_msg, (int)strlen(usage_msg) + 1, 0);
+            }
             continue;
         }
 
