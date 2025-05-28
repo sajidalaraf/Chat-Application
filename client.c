@@ -28,6 +28,11 @@ int my_color_code = 0;
 const char* colors[] = { "\033[36m" };
 const char* def_col = "\033[0m";
 
+void ProcessListCommand() {
+    char command[] = "/list";
+    send(client_socket, command, (int)strlen(command) + 1, 0);
+}
+
 void catch_ctrl_c(int signal) {
     (void)signal;
     if (exit_flag) return;
@@ -76,6 +81,27 @@ unsigned __stdcall send_message(void* params) {
         if (in_private_chat && strcmp(str, "return") == 0) {
             send(client_socket, "#endprivate", (int)strlen("#endprivate") + 1, 0);
             in_private_chat = 0;
+            continue;
+        }
+
+        if (strcmp(str, "/help") == 0) {
+            EnterCriticalSection(&cs_print);
+            printf("\nCommands:\n");
+            printf("/<username> - Start a private chat with that user\n");
+            printf("return - Leave private chat and return to group chat\n");
+            printf("//<username> <message> - Send a direct message\n");
+            printf("/ai <message> - Chat with Gemini AI\n");
+            printf("/list - List users currently in public chat\n");
+            printf("/help - Show this help\n");
+            printf("#exit - Disconnect from server\n");
+            printf("%sYou: %s", colors[0], def_col);
+            fflush(stdout);
+            LeaveCriticalSection(&cs_print);
+            continue;
+        }
+
+        if (strcmp(str, "/list") == 0) {
+            ProcessListCommand();
             continue;
         }
 
@@ -188,6 +214,7 @@ unsigned __stdcall recv_message(void* params) {
 
             eraseText(6);
             printf("\n%s[Direct] %s: %s%s\n", colors[0], token, def_col, message);
+            printf("%sYou: %s", colors[0], def_col);
             fflush(stdout);
         }
         else if (strstr(str, "GROUP_MSG:") != NULL) {
@@ -201,6 +228,7 @@ unsigned __stdcall recv_message(void* params) {
                 eraseText(6);
                 printf("\n%s%s: %s%s\n", colors[0], token, def_col, message);
                 printf("%sYou: %s", colors[0], def_col);
+                fflush(stdout);
             }
         }
         else if (strstr(str, "has left the group chat\n") != NULL ||
@@ -348,10 +376,36 @@ int main() {
         return 1;
     }
 
-    printf("%s\n \n\t              Welcome to WChat              %s\n", colors[0], def_col);
+    // Animated welcome message
+    const char* welcome = "Welcome to WChat";
+    const char* copyright = "(c) 2025 WChat. All rights reserved.";
+
+    // Center and display "Welcome to WChat" character by character
+    printf("\n%*s", (40 - (int)strlen(welcome)) / 2, "");
+    for (int i = 0; welcome[i] != '\0'; i++) {
+        printf("%s%c%s", colors[0], welcome[i], def_col);
+        fflush(stdout);
+        Sleep(80); // 80ms delay for slightly faster effect
+    }
+    printf("\n");
+
+    // Center and display "(c) 2025 WChat. All rights reserved." character by character
+    printf("%*s", (40 - (int)strlen(copyright)) / 2, "");
+    for (int i = 0; copyright[i] != '\0'; i++) {
+        printf("%s%c%s", colors[0], copyright[i], def_col);
+        fflush(stdout);
+        Sleep(40); // 40ms delay for slightly faster effect
+    }
+    printf("\n\n");
+
+    // Display command instructions
     printf("\nType /<username> to start a private chat with that user\n");
     printf("Type 'return' to leave private chat and return to group chat\n");
-    printf("Type //<username> <message> to send a direct message\n \n");
+    printf("Type //<username> <message> to send a direct message\n");
+    printf("Type /ai <message> to chat with Gemini AI\n");
+    printf("Type /list to list users currently in public chat\n");
+    printf("Type /help to show commands\n");
+    printf("Type #exit to disconnect from server\n \n");
 
     signal(SIGINT, catch_ctrl_c);
 
